@@ -1,110 +1,123 @@
 import streamlit as st
 from pytube import YouTube
-import tempfile
 from moviepy.editor import VideoFileClip
-import os
 from pydub import AudioSegment
+import tempfile
+import os
 import openai
 
-# --- Helper functions ---
+# Set OpenAI API key from Streamlit secrets or environment variable
+openai.api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 
-def download_video_youtube(url):
+st.title("🎤 English Accent Detection Tool")
+
+st.markdown(
+    """
+    Enter a public video URL (YouTube, Loom, or direct MP4 link).
+    The app will extract audio, transcribe it, and detect the English accent.
+    """
+)
+
+video_url = st.text_input("Enter video URL")
+
+def download_youtube_video(url, path):
     yt = YouTube(url)
-    stream = yt.streams.filter(only_video=False, file_extension='mp4').order_by('resolution').desc().first()
-    temp_video_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    stream.download(output_path=os.path.dirname(temp_video_file.name), filename=os.path.basename(temp_video_file.name))
-    return temp_video_file.name
+    stream = yt.streams.filter(progressive=True, file_extension="mp4").order_by('resolution').desc().first()
+    stream.download(output_path=path, filename="video.mp4")
+    return os.path.join(path, "video.mp4")
 
-def extract_audio_from_video(video_path):
+def download_direct_mp4(url, path):
+    import requests
+    r = requests.get(url)
+    file_path = os.path.join(path, "video.mp4")
+    with open(file_path, 'wb') as f:
+        f.write(r.content)
+    return file_path
+
+def extract_audio(video_path):
     video = VideoFileClip(video_path)
-    temp_audio_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-    video.audio.write_audiofile(temp_audio_file.name, codec='pcm_s16le')
+    audio_path = video_path.replace(".mp4", ".wav")
+    video.audio.write_audiofile(audio_path, logger=None)
     video.close()
-    return temp_audio_file.name
+    return audio_path
 
-def transcribe_audio_openai(audio_file):
-    audio_file_obj = open(audio_file, "rb")
-    transcript = openai.Audio.transcribe("whisper-1", audio_file_obj)
-    audio_file_obj.close()
+def transcribe_audio(audio_path):
+    with open(audio_path, "rb") as audio_file:
+        transcript = openai.Audio.transcribe("whisper-1", audio_file)
     return transcript["text"]
 
-def analyze_accent(text):
-    # Basic heuristic rules based on keywords / phrases
-    accents = {
-        "British": ["lorry", "biscuit", "petrol", "lift", "boot", "flat"],
-        "American": ["truck", "cookie", "gasoline", "elevator", "trunk", "apartment"],
-        "Australian": ["arvo", "servo", "brekkie", "mozzie"],
-        "Indian": ["prepone", "timepass", "cousin-brother"],
-    }
+def classify_accent(text):
+    prompt = f"""
+You are an expert linguist specialized in identifying English accents.
 
-    scores = {}
-    text_lower = text.lower()
-    for accent, keywords in accents.items():
-        count = sum(text_lower.count(word) for word in keywords)
-        scores[accent] = count
-    
-    # Get highest score accent
-    best_accent = max(scores, key=scores.get)
-    total = sum(scores.values())
-    confidence = (scores[best_accent] / total * 100) if total > 0 else 50  # 50% if unsure
+Based on the following transcript of a speaker, classify their English accent into one of these categories:
+- British
+- American
+- Australian
+- Canadian
+- Irish
+- Scottish
+- Indian
+- Other English Accent
 
-    summary = f"Detected accent: {best_accent} with confidence {confidence:.1f}% based on keyword frequency."
+Also provide a confidence score between 0 and 100% that the speaker is a native or fluent English speaker with that accent.
 
-    return best_accent, confidence, summary
+Transcript:
+\"\"\"
+{text}
+\"\"\"
 
-# --- Streamlit UI ---
+Return the response in JSON format:
+{{
+  "accent": "Accent name",
+  "confidence": "Confidence score as percentage",
+  "summary": "Brief explanation"
+}}
+"""
 
-st.title("English Accent Detection Tool 🎤")
-
-st.markdown("""
-Upload a **YouTube URL** or a **direct MP4 video URL**.
-The app will extract the audio, transcribe it, and classify the English accent.
-""")
-
-video_url = st.text_input("Enter YouTube or direct MP4 video URL")
+    response = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "system", "content": "You are an expert English accent classifier."},
+                  {"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=200,
+    )
+    # Parse JSON from response safely
+    import json
+    try:
+        answer_text = response['choices'][0]['message']['content'].strip()
+        result = json.loads(answer_text)
+    except Exception:
+        # fallback if JSON parse fails, return raw text
+        result = {"accent": "Unknown", "confidence": "0%", "summary": answer_text}
+    return result
 
 if st.button("Analyze Accent"):
     if not video_url:
-        st.error("Please enter a valid video URL.")
+        st.error("Please enter a video URL.")
     else:
-        with st.spinner("Downloading video..."):
-            try:
-                if "youtube.com" in video_url or "youtu.be" in video_url:
-                    video_path = download_video_youtube(video_url)
-                else:
-                    st.error("Currently only YouTube URLs are supported. Direct MP4 support coming soon.")
-                    st.stop()
-            except Exception as e:
-                st.error(f"Failed to download video: {e}")
-                st.stop()
+        with st.spinner("Processing..."):
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                try:
+                    if "youtube.com" in video_url or "youtu.be" in video_url:
+                        video_path = download_youtube_video(video_url, tmp_dir)
+                    elif video_url.endswith(".mp4"):
+                        video_path = download_direct_mp4(video_url, tmp_dir)
+                    else:
+                        st.error("Unsupported video URL. Use YouTube or direct MP4 link.")
+                        st.stop()
 
-        with st.spinner("Extracting audio..."):
-            try:
-                audio_path = extract_audio_from_video(video_path)
-            except Exception as e:
-                st.error(f"Failed to extract audio: {e}")
-                st.stop()
+                    audio_path = extract_audio(video_path)
+                    transcript = transcribe_audio(audio_path)
 
-        with st.spinner("Transcribing audio with OpenAI Whisper..."):
-            try:
-                openai.api_key = st.secrets["OPENAI_API_KEY"]  # Put your OpenAI key in Streamlit secrets
-                transcription = transcribe_audio_openai(audio_path)
-                st.markdown("### Transcription:")
-                st.write(transcription)
-            except Exception as e:
-                st.error(f"Failed to transcribe audio: {e}")
-                st.stop()
+                    st.subheader("Transcript")
+                    st.write(transcript)
 
-        with st.spinner("Analyzing accent..."):
-            accent, confidence, summary = analyze_accent(transcription)
-            st.markdown("### Accent Classification Results:")
-            st.write(f"**Accent:** {accent}")
-            st.write(f"**Confidence Score:** {confidence:.1f}%")
-            st.write(f"**Summary:** {summary}")
+                    classification = classify_accent(transcript)
 
-        # Cleanup temp files
-        try:
-            os.remove(video_path)
-            os.remove(audio_path)
-        except Exception:
-            pass
+                    st.subheader("Accent Classification")
+                    st.write(f"**Accent:** {classification.get('accent','Unknown')}")
+                    st.write(f"**Confidence:** {classification.get('confidence','0%')}")
+                    st.write(f"**Summary:** {classification.get('summary','No summary available')}")
+                except Exception as e:
+                    st.error(f"Error processing video: {e}")
