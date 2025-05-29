@@ -1,6 +1,7 @@
 streamlit
 pytube
 moviepy
-openai
 pydub
+openai
 imageio[ffmpeg]
+requests
