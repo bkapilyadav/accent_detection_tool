@@ -3,3 +3,4 @@ pytube
 moviepy
 openai
 pydub
+imageio[ffmpeg]
